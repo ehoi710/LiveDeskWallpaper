@@ -11,13 +11,14 @@ extern "C" {
 
 #include <mutex>
 #include <thread>
+#include <chrono>
 
 #include <string.h>
-#include <psapi.h>
 #include <Windows.h>
 #include <conio.h>
 
 #pragma warning(disable : 4996)
+#pragma warning(disable : 6031)
 #pragma warning(disable : 26812)
 
 #pragma comment(lib, "swscale.lib")
@@ -27,6 +28,8 @@ extern "C" {
 #pragma comment(lib, "avcodec.lib")
 
 #undef main
+
+using namespace std::chrono;
 
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lparam) {
 	HWND p, *ret;
@@ -53,14 +56,12 @@ HWND get_wallpaper_window() {
 }
 
 void wallpaper_loop(const char* arg, const bool* check) {
-	int ret, vstrm_idx;
+	int vstrm_idx;
 	int dst_width = 0, dst_height = 0;
+	int ret, got_pic = 0;
 
 	double framerate = 30.0f;
-	
-	int got_pic = 0;
-	int nb_frames = 0;
-	bool end_of_stream = false;
+	int framedist = 33;
 
 	AVFormatContext* inctx = nullptr;
 	SwsContext* swsctx = nullptr;
@@ -76,6 +77,9 @@ void wallpaper_loop(const char* arg, const bool* check) {
 	SDL_Texture* img = nullptr;
 
 	uint8_t* framebuf;
+
+	system_clock::time_point start, end;
+	milliseconds sec;
 
 	SDL_Init(SDL_INIT_VIDEO);
 	
@@ -111,20 +115,17 @@ void wallpaper_loop(const char* arg, const bool* check) {
 		exit(-1);
 	}
 	framerate = av_q2d(vstrm->codec->framerate);
+	framedist = (int)(1000 / framerate);
 
 	printf("infile: %s\n", arg);
-	printf("format: %s\n", inctx->iformat->name);
-	printf("vcodec: %s\n", vcodec->name);
-	printf("size  : %d x %d\n", vstrm->codec->width, vstrm->codec->height);
+	printf("origin: %d x %d\n", vstrm->codec->width, vstrm->codec->height);
 	printf("fps   : %lf\n", framerate);
-	printf("pixfmt: %s\n", av_get_pix_fmt_name(vstrm->codec->pix_fmt));
+	printf("output: %d x %d\n", dst_width, dst_height);
 
-	swsctx = sws_getCachedContext(
-		nullptr, vstrm->codec->width, vstrm->codec->height, vstrm->codec->pix_fmt,
+	swsctx = sws_getContext(
+		vstrm->codec->width, vstrm->codec->height, vstrm->codec->pix_fmt,
 		dst_width, dst_height, dst_pix_fmt, SWS_BICUBIC, nullptr, nullptr, nullptr
 	);
-
-	printf("output: %d x %d\n", dst_width, dst_height);
 
 	frame = av_frame_alloc();
 	decframe = av_frame_alloc();
@@ -132,25 +133,25 @@ void wallpaper_loop(const char* arg, const bool* check) {
 	framebuf = new uint8_t[avpicture_get_size(dst_pix_fmt, dst_width, dst_height)];
 	avpicture_fill((AVPicture*)frame, framebuf, dst_pix_fmt, dst_width, dst_height);
 
-	while(true) {
-		if (*check) break;
+	while(*check == false) {
+		start = system_clock::now();
 
-		if (!end_of_stream) {
-			ret = av_read_frame(inctx, &packet);
-			if (ret == 0 && packet.stream_index != vstrm_idx)
-				goto next_packet;
-			end_of_stream = (ret == AVERROR_EOF);
+		ret = av_read_frame(inctx, &packet);
+		if (ret == 0 && packet.stream_index != vstrm_idx) {
+			av_free_packet(&packet);
+			continue;
 		}
-		if (end_of_stream) {
+		
+		if (ret == AVERROR_EOF) {
 			av_seek_frame(inctx, vstrm_idx, 0, AVSEEK_FLAG_FRAME);
-			end_of_stream = false;
-
 			continue;
 		}
 
 		avcodec_decode_video2(vstrm->codec, decframe, &got_pic, &packet);
-		if (!got_pic)
-			goto next_packet;
+		if (!got_pic) {
+			av_free_packet(&packet);
+			continue;
+		}
 
 		sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
 		SDL_UpdateYUVTexture(img, nullptr, 
@@ -163,11 +164,11 @@ void wallpaper_loop(const char* arg, const bool* check) {
 		SDL_RenderCopy(renderer, img, nullptr, nullptr);
 		SDL_RenderPresent(renderer);
 
-		SDL_Delay((int)(1000 / framerate));
+		end = system_clock::now();
+		sec = duration_cast<milliseconds>(end - start);
 
-		nb_frames++;
+		SDL_Delay(max(framedist - sec.count(), 0));
 
-	next_packet:
 		av_free_packet(&packet);
 	}
 
@@ -181,28 +182,30 @@ int main(int argc, char* argv[]) {
 		exit(-1);
 	}
 
-	int c;
+	int command;
 	bool check = false;
-
 	HANDLE mutex;
+
+	std::thread wallpaper_thread;
 
 	mutex = OpenMutex(MUTEX_ALL_ACCESS, 0, L"LiveDeskWallpaper.exe");
 	if (!mutex) {
 		mutex = CreateMutex(0, 0, L"LiveDeskWallpaper.exe");
 	}
 	else {
-		fprintf(stderr, "already has instance!\npress any key to close this window...");
-		c = getch();
+		fprintf(stderr, "already has instance!\npress any key to close this window...\n");
+		getch();
 		exit(-1);
 	}
 
-	std::thread wallpaper_thread(wallpaper_loop, argv[1], &check);
-	while (true) {
-		c = getch();
-		if (c == 'q') {
+	wallpaper_thread = std::thread(wallpaper_loop, argv[1], &check);
+	while (!check) {
+		command = getch();
+		switch (command) {
+		case 'Q':
+		case 'q':
 			check = true;
 			wallpaper_thread.join();
-
 			break;
 		}
 	}
