@@ -11,6 +11,13 @@
 #define IDM_FILE_OPEN 0
 #define IDM_FILE_CLOSE 1
 
+#define SUB_X(i) (10 + (sub_width + 10) * (i))
+#define SUB_Y(i) (10 + (sub_height + 10) * (i))
+
+#define SUB_COL 3
+#define SUB_ROW 3
+#define MAX_SUBWINDOW (SUB_ROW * SUB_COL)
+
 using namespace std::chrono;
 
 LRESULT CALLBACK ChildProc(HWND, UINT, WPARAM, LPARAM);
@@ -22,6 +29,7 @@ HWND GetWallpaperWindow();
 void RegisterMyWindow(HINSTANCE);
 
 void SetFile(const wchar_t*);
+
 void AddRecentlyQueue(const wchar_t*);
 void RefreshChild();
 
@@ -30,33 +38,40 @@ int ShowFileOpenDialog(wchar_t* _dst);
 const wchar_t* class_name = L"LiveDeskWallpaperGUI";
 const wchar_t* title = L"Live Desktop Wallpaper GUI";
 
+const wchar_t* subwindow_class_name = L"sub window";
+
 MediaProvider* wallpaper_provider;
-MediaProvider* subwindow_provider[6];
+MediaProvider* subwindow_provider[MAX_SUBWINDOW];
 
 HWND wallpaper_handle;
-HWND subwindow_handle[6];
+HWND subwindow_handle[MAX_SUBWINDOW];
 
-std::wstring recently_queue[6];
+std::wstring recently_queue[MAX_SUBWINDOW];
 
 bool tracking = false;
 
 bool wallpaper_check = true, subwindow_check = true;
 std::thread wallpaper_thread, subwindow_thread;
 
-int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+const int sub_width = 256;
+const int sub_height = 144;
+
+int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
 	HWND hWnd;
 	MSG msg;
 	RECT rect;
 
-	int w, h;
+	wchar_t file_name[128];
+
+	int client_width, client_height;
 	
 	SDL_Init(SDL_INIT_VIDEO);
 	av_register_all();
 
 	RegisterMyWindow(hInstance);
-
-	hWnd = CreateWindowW(class_name, title, WS_OVERLAPPEDWINDOW, 
-		160, 90, 640, 360, NULL, NULL, hInstance, NULL);
+	
+	hWnd = CreateWindowExW(WS_EX_ACCEPTFILES, class_name, title, WS_OVERLAPPEDWINDOW ^ WS_THICKFRAME, 
+		160, 90, SUB_X(SUB_COL) + 16, SUB_Y(SUB_ROW) + 59, nullptr, nullptr, hInstance, nullptr);
 
 	ShowWindow(hWnd, nCmdShow);
 	UpdateWindow(hWnd);
@@ -66,38 +81,29 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 	
 	GetClientRect(hWnd, &rect);
 	
-	w = rect.right - rect.left;
-	h = rect.bottom - rect.top;
+	client_width = rect.right - rect.left;
+	client_height = rect.bottom - rect.top;
 
-	for (int i = 0; i < 6; i++) {
-		subwindow_handle[i] = CreateWindowExW(0, L"test", nullptr, WS_CHILD,
-			10 + ((w - 10) / 3) * (i % 3), 
-			10 + ((h - 10) / 2) * (i / 3), 
-			((w - 40) / 3), 
-			((h - 30) / 2), 
-			hWnd, (HMENU)i, hInstance, nullptr);
+	for (int i = 0; i < MAX_SUBWINDOW; i++) {
+		subwindow_handle[i] = CreateWindowExW(WS_EX_ACCEPTFILES, subwindow_class_name, L"", WS_CHILD,
+			SUB_X(i%SUB_COL), SUB_Y(i/SUB_COL), sub_width, sub_height, hWnd, (HMENU)i, hInstance, nullptr);
+		subwindow_provider[i] = new MediaProvider(subwindow_handle[i]);
 
 		ShowWindow(subwindow_handle[i], nCmdShow);
 		UpdateWindow(subwindow_handle[i]);
-
-		subwindow_provider[i] = new MediaProvider(subwindow_handle[i]);
 	}
 
 	if (lpCmdLine[0] != '\0') {
-		wallpaper_check = false;
-
-		wallpaper_provider->open(lpCmdLine);
-		wallpaper_thread = std::thread(
-			[](MediaProvider* prov, const bool* check) {
-				prov->drawLoop(check);
-			},
-			wallpaper_provider,
-			&wallpaper_check
-		);
+		SetFile(lpCmdLine);
 	}
 
 	while (GetMessage(&msg, NULL, 0, 0)) {
 		try {
+			if (msg.message == WM_DROPFILES) {
+				DragQueryFile((HDROP)msg.wParam, 0, file_name, 128);
+				SetFile(file_name);
+			}
+
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
@@ -108,7 +114,8 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
 	wallpaper_check = true;
 
-	if (wallpaper_thread.joinable()) wallpaper_thread.join();
+	if (wallpaper_thread.joinable()) 
+		wallpaper_thread.join();
 
 	delete wallpaper_provider;
 
@@ -121,24 +128,21 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
 LRESULT CALLBACK ChildProc(HWND hWnd, UINT uMessage, WPARAM wParam, LPARAM lParam) {
 	int id = GetWindowLong(hWnd, GWL_ID);
-
+	wchar_t file_name[128];
+	
 	switch (uMessage) {
-	case WM_PAINT: {
-		HDC hdc;
-		PAINTSTRUCT ps;
-		RECT rect;
-
-		hdc = BeginPaint(hWnd, &ps);
-		GetClientRect(hWnd, &rect);
-		
-		FillRect(
-			hdc,
-			&rect,
-			CreateSolidBrush(RGB(0, 0, 0))
-		);
-
-		EndPaint(hWnd, &ps);
+	case WM_CREATE: {
+		// DragAcceptFiles(hWnd, true);
 	} break;
+
+	case WM_PAINT: {
+		subwindow_provider[id]->fetchOne();
+	} break;
+
+	/*case WM_DROPFILES: {
+		DragQueryFile((HDROP)wParam, 0, file_name, 128);
+		SetFile(file_name);
+	} break;*/
 
 	case WM_MOUSEMOVE: {
 		TRACKMOUSEEVENT tme = {
@@ -169,16 +173,16 @@ LRESULT CALLBACK ChildProc(HWND hWnd, UINT uMessage, WPARAM wParam, LPARAM lPara
 			tracking = false;
 
 			subwindow_check = true;
-			if (subwindow_thread.joinable()) subwindow_thread.join();
+			if (subwindow_thread.joinable()) 
+				subwindow_thread.join();
 
 			subwindow_provider[id]->fetchOne();
 		}
 	} break;
 
 	case WM_LBUTTONDOWN: {
-		int id = GetWindowLong(hWnd, GWL_ID);
 		if (recently_queue[id] != L"")
-			MessageBox(0, recently_queue[id].c_str(), L"", 0);
+			SetFile(recently_queue[id].c_str());
 		else
 			MessageBox(0, L"NULL", L"", 0);
 	} break;
@@ -204,7 +208,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMessage, WPARAM wParam, LPARAM lParam)
 		AppendMenuW(hMenubar, MF_POPUP, (UINT_PTR)hMenu, L"&File");
 
 		SetMenu(hWnd, hMenubar);
-		DragAcceptFiles(hWnd, true);
+		// DragAcceptFiles(hWnd, true);
 	} break;
 
 	case WM_COMMAND:
@@ -216,10 +220,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMessage, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	case WM_DROPFILES: 
+	/*case WM_DROPFILES: {
 		DragQueryFile((HDROP)wParam, 0, file_name, 128);
 		SetFile(file_name);
-		break;
+	} break;*/
 
 	case WM_DESTROY:
 		PostQuitMessage(0);
@@ -273,7 +277,7 @@ void RegisterMyWindow(HINSTANCE hInstance) {
 	cwc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
 	cwc.hInstance = hInstance;
 	cwc.lpfnWndProc = ChildProc;
-	cwc.lpszClassName = L"test";
+	cwc.lpszClassName = subwindow_class_name;
 	cwc.lpszMenuName = NULL;
 	cwc.style = CS_HREDRAW | CS_VREDRAW;
 
@@ -283,13 +287,20 @@ void RegisterMyWindow(HINSTANCE hInstance) {
 
 void SetFile(const wchar_t* file_name) {
 	wallpaper_check = true;
+	subwindow_check = true;
 
-	if (wallpaper_thread.joinable()) wallpaper_thread.join();
+	if (wallpaper_thread.joinable()) 
+		wallpaper_thread.join();
+
+	if (subwindow_thread.joinable()) 
+		subwindow_thread.join();
 
 	wallpaper_provider->clear();
-
 	wallpaper_check = false;
-
+	
+	subwindow_check = false;
+	tracking = false;
+	
 	wallpaper_provider->open(file_name);
 	wallpaper_thread = std::thread(
 		[](MediaProvider* prov, const bool* check) {
@@ -304,17 +315,19 @@ void SetFile(const wchar_t* file_name) {
 }
 void AddRecentlyQueue(const wchar_t* str) {
 	int i, find;
-	for (find = 0; find < 6; find++) {
+	std::wstring new_str(str);
+
+	for (find = 0; find < MAX_SUBWINDOW; find++) {
 		if (recently_queue[find] == str) break;
 	}
 
-	for (i = min(5, find); i > 0; i--)
+	for (i = min(MAX_SUBWINDOW - 1, find); i > 0; i--)
 		recently_queue[i] = recently_queue[i - 1];
 
-	recently_queue[0] = std::wstring(str);
+	recently_queue[0] = new_str;
 }
 void RefreshChild() {
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < MAX_SUBWINDOW; i++) {
 		subwindow_provider[i]->clear();
 		if (recently_queue[i] != L"") {
 			subwindow_provider[i]->open(recently_queue[i].c_str());
@@ -328,28 +341,18 @@ int ShowFileOpenDialog(wchar_t* _dst) {
 	IFileOpenDialog* pFileOpen;
 	IShellItem* pItem;
 	PWSTR pszFilePath;
-	HRESULT hr;
 
-	if (!SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return 0;
+	if (!SUCCEEDED(CoInitializeEx(NULL, COINIT_DISABLE_OLE1DDE | COINIT_APARTMENTTHREADED))) return 0;
+	if (!SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_IFileOpenDialog, (void**)&pFileOpen))) goto E1;
+	if (!SUCCEEDED(pFileOpen->Show(NULL)) || !SUCCEEDED(pFileOpen->GetResult(&pItem))) goto E2;
+	if (!SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath))) goto E3;
 
-	hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_IFileOpenDialog, (void**)&pFileOpen);
-	if (SUCCEEDED(hr)) {
-		hr = pFileOpen->Show(NULL);
-		if (SUCCEEDED(hr)) {
-			hr = pFileOpen->GetResult(&pItem);
-			if (SUCCEEDED(hr)) {
-				hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, 
-						                    &pszFilePath);
-				if (SUCCEEDED(hr)) {
-					wcscpy(_dst, pszFilePath);
-					CoTaskMemFree(pszFilePath);
-				}
-				pItem->Release();
-			}
-		}
-		pFileOpen->Release();
-	}
-	CoUninitialize();
+	wcscpy(_dst, pszFilePath);
+	CoTaskMemFree(pszFilePath);
+
+E3:	pItem->Release();
+E2:	pFileOpen->Release();
+E1:	CoUninitialize();
 
 	return 0;
 }
