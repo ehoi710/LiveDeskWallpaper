@@ -39,7 +39,8 @@ public:
 		renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 		texture = SDL_CreateTexture(
 			renderer,
-			SDL_PIXELFORMAT_YV12,
+			//SDL_PIXELFORMAT_YV12,
+			SDL_PIXELFORMAT_IYUV,
 			SDL_TEXTUREACCESS_STREAMING,
 			window_width, window_height
 		);
@@ -169,10 +170,12 @@ public:
 
 			sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
 			SDL_UpdateYUVTexture(texture, &draw_rect,
-				frame->data[0], frame->linesize[0], 
-				frame->data[1], frame->linesize[1], 
-				frame->data[2], frame->linesize[2]
+			 	frame->data[0], frame->linesize[0], 
+			 	frame->data[1], frame->linesize[1], 
+			 	frame->data[2], frame->linesize[2]
 			);
+
+			// SDL_UpdateTexture(texture, &draw_rect, framebuf, video_height);
 			
 			SDL_RenderClear(renderer);
 			SDL_RenderCopy(renderer, texture, &draw_rect, &draw_rect);
